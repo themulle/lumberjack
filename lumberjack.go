@@ -1,5 +1,8 @@
 // Package lumberjack provides a rolling logger.
 //
+// This fork provides an option to direcly compress the log file unsing gzip.Writer
+// Therefore the option CompressImmediately has been provided
+//
 // Note that this is v2.0 of lumberjack, and should be imported using gopkg.in
 // thusly:
 //
@@ -107,12 +110,17 @@ type Logger struct {
 	// using gzip. The default is not to perform compression.
 	Compress bool `json:"compress" yaml:"compress"`
 
+	// CompressImmediately determines if the log file should be immediately
+	// compressed using gzip. The default is not to perform compression.
+	CompressImmediately bool `json:"CompressImmediately" yaml:"CompressImmediately"`
+
 	size int64
 	file *os.File
 	mu   sync.Mutex
 
 	millCh    chan bool
 	startMill sync.Once
+	zipWriter *gzip.Writer
 }
 
 var (
@@ -144,8 +152,14 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 	}
 
 	if l.file == nil {
-		if err = l.openExistingOrNew(len(p)); err != nil {
-			return 0, err
+		if l.CompressImmediately {
+			if err = l.openNew(); err != nil {
+				return 0, err
+			}
+		} else {
+			if err = l.openExistingOrNew(len(p)); err != nil {
+				return 0, err
+			}
 		}
 	}
 
@@ -155,7 +169,11 @@ func (l *Logger) Write(p []byte) (n int, err error) {
 		}
 	}
 
-	n, err = l.file.Write(p)
+	if l.zipWriter != nil {
+		n, err = l.zipWriter.Write(p)
+	} else {
+		n, err = l.file.Write(p)
+	}
 	l.size += int64(n)
 
 	return n, err
@@ -173,6 +191,11 @@ func (l *Logger) close() error {
 	if l.file == nil {
 		return nil
 	}
+	if l.zipWriter != nil {
+		l.zipWriter.Close()
+		l.zipWriter = nil
+	}
+
 	err := l.file.Close()
 	l.file = nil
 	return err
@@ -238,6 +261,13 @@ func (l *Logger) openNew() error {
 	}
 	l.file = f
 	l.size = 0
+	if l.CompressImmediately {
+		if zw, err := gzip.NewWriterLevel(l.file, 9); err != nil {
+			return err
+		} else {
+			l.zipWriter = zw
+		}
+	}
 	return nil
 }
 
@@ -263,6 +293,10 @@ func backupName(name string, local bool) string {
 // put it over the MaxSize, a new file is created.
 func (l *Logger) openExistingOrNew(writeLen int) error {
 	l.mill()
+
+	if l.CompressImmediately {
+		return fmt.Errorf("can't open existing file in CompressImmediately mode")
+	}
 
 	filename := l.filename()
 	info, err := osStat(filename)
@@ -348,7 +382,7 @@ func (l *Logger) millRunOnce() error {
 		files = remaining
 	}
 
-	if l.Compress {
+	if l.Compress && !l.CompressImmediately {
 		for _, f := range files {
 			if !strings.HasSuffix(f.Name(), compressSuffix) {
 				compress = append(compress, f)

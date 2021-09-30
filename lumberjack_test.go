@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -688,6 +689,87 @@ func TestCompressOnResume(t *testing.T) {
 	fileCount(dir, 2, t)
 }
 
+func TestCompressImmediately(t *testing.T) {
+	currentTime = fakeTime
+
+	dir := makeTempDir("TestNewFile", t)
+	defer os.RemoveAll(dir)
+	l := &Logger{
+		Filename:            logFile(dir),
+		CompressImmediately: true,
+	}
+	defer l.Close()
+	b := []byte(strings.Repeat("boo!", 20))
+	bc := getCompressedBytes(b)
+	n, err := l.Write(b)
+	isNil(err, t)
+	equals(len(b), n, t)
+	l.Close()
+
+	existsWithContent(logFile(dir), bc, t)
+	fileCount(dir, 1, t)
+}
+
+func TestRotateCompressImmediately(t *testing.T) {
+	currentTime = fakeTime
+	dir := makeTempDir("TestRotate", t)
+	defer os.RemoveAll(dir)
+
+	filename := logFile(dir)
+
+	l := &Logger{
+		Filename:            filename,
+		MaxBackups:          1,
+		MaxSize:             100, // megabytes
+		CompressImmediately: true,
+		Compress:            true,
+	}
+	defer l.Close()
+	b := []byte(strings.Repeat("boo!", 20))
+	bc := getCompressedBytes(b)
+	n, err := l.Write(b)
+	isNil(err, t)
+	equals(len(b), n, t)
+
+	exists(filename, t)
+	fileCount(dir, 1, t)
+
+	newFakeTime()
+
+	err = l.Rotate()
+	isNil(err, t)
+
+	// we need to wait a little bit since the files get deleted on a different
+	// goroutine.
+	<-time.After(10 * time.Millisecond)
+
+	filename2 := backupFile(dir)
+	existsWithContent(filename2, bc, t)
+	existsWithContent(filename, []byte{}, t)
+	fileCount(dir, 2, t)
+	newFakeTime()
+
+	err = l.Rotate()
+	isNil(err, t)
+
+	// we need to wait a little bit since the files get deleted on a different
+	// goroutine.
+	<-time.After(10 * time.Millisecond)
+
+	filename3 := backupFile(dir)
+	existsWithContent(filename3, getCompressedBytes([]byte{}), t)
+	existsWithContent(filename, []byte{}, t)
+	fileCount(dir, 2, t)
+
+	b2 := []byte("foooooo!")
+	n, err = l.Write(b2)
+	isNil(err, t)
+	equals(len(b2), n, t)
+	l.Close()
+	// this will use the new fake time
+	existsWithContent(filename, getCompressedBytes(b2), t)
+}
+
 func TestJson(t *testing.T) {
 	data := []byte(`
 {
@@ -696,7 +778,8 @@ func TestJson(t *testing.T) {
 	"maxage": 10,
 	"maxbackups": 3,
 	"localtime": true,
-	"compress": true
+	"compress": true,
+	"compressImmediately":false
 }`[1:])
 
 	l := Logger{}
@@ -708,6 +791,7 @@ func TestJson(t *testing.T) {
 	equals(3, l.MaxBackups, t)
 	equals(true, l.LocalTime, t)
 	equals(true, l.Compress, t)
+	equals(false, l.CompressImmediately, t)
 }
 
 func TestYaml(t *testing.T) {
@@ -813,4 +897,12 @@ func notExist(path string, t testing.TB) {
 func exists(path string, t testing.TB) {
 	_, err := os.Stat(path)
 	assertUp(err == nil, t, 1, "expected file to exist, but got error from os.Stat: %v", err)
+}
+
+func getCompressedBytes(in []byte) []byte {
+	var buf bytes.Buffer
+	w, _ := gzip.NewWriterLevel(&buf, 9)
+	w.Write(in)
+	w.Close()
+	return buf.Bytes()
 }
